@@ -114,6 +114,36 @@ impl NCryptKey {
         }
     }
 
+/*     fn set_string_property(&self, property: PCWSTR) -> Result<String> {
+        let mut result: u32 = 0;
+        unsafe {
+            CngError::from_hresult(NCryptSetProperty(
+                self.inner(),
+                property,
+                ptr::null_mut(),
+                0,
+                &mut result,
+                OBJECT_SECURITY_INFORMATION::default(),
+            ))?;
+
+            let mut prop_value = vec![0u8; result as usize];
+
+            CngError::from_hresult(NCryptGetProperty(
+                self.inner(),
+                property,
+                prop_value.as_mut_ptr(),
+                prop_value.len() as u32,
+                &mut result,
+                OBJECT_SECURITY_INFORMATION::default(),
+            ))?;
+
+            Ok(String::from_utf16_lossy(std::slice::from_raw_parts(
+                prop_value.as_ptr() as *const u16,
+                prop_value.len() / 2 - 1,
+            )))
+        }
+    } */
+
     /// Return a number of bits in the key material
     pub fn bits(&self) -> Result<u32> {
         let mut bits = [0u8; 4];
