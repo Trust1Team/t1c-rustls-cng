@@ -114,7 +114,7 @@ impl NCryptKey {
         }
     }
 
-/*     fn set_string_property(&self, property: PCWSTR) -> Result<String> {
+    fn set_string_property(&self, property: PCWSTR, pin: &str) -> Result<()> {
         let mut result: u32 = 0;
         unsafe {
             CngError::from_hresult(NCryptSetProperty(
@@ -122,27 +122,27 @@ impl NCryptKey {
                 property,
                 ptr::null_mut(),
                 0,
-                &mut result,
-                OBJECT_SECURITY_INFORMATION::default(),
+                0,
             ))?;
 
-            let mut prop_value = vec![0u8; result as usize];
+            let prop_value = pin;
 
-            CngError::from_hresult(NCryptGetProperty(
+            CngError::from_hresult(NCryptSetProperty(
                 self.inner(),
                 property,
-                prop_value.as_mut_ptr(),
+                prop_value.as_ptr(),
                 prop_value.len() as u32,
-                &mut result,
-                OBJECT_SECURITY_INFORMATION::default(),
+                0,
             ))?;
 
-            Ok(String::from_utf16_lossy(std::slice::from_raw_parts(
-                prop_value.as_ptr() as *const u16,
-                prop_value.len() / 2 - 1,
-            )))
+            Ok(())
         }
-    } */
+    }
+
+    /// Set PIN 
+    pub fn set_pin(&self, pin: &str) -> Result<()> { 
+        self.set_string_property(NCRYPT_PIN_PROPERTY, pin)
+    }
 
     /// Return a number of bits in the key material
     pub fn bits(&self) -> Result<u32> {

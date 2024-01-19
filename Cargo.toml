@@ -17,6 +17,7 @@ targets = ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"]
 rustls = { git = "https://github.com/rustls/rustls" }
 sha2 = "0.10"
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+#cryptoki = { version = "temp-0.2.2", git = "https://github.com/Trust1Team/rust-cryptoki-temp" }
 
 [dev-dependencies]
 anyhow = "1"
