@@ -115,16 +115,7 @@ impl NCryptKey {
     }
 
     fn set_string_property(&self, property: PCWSTR, pin: &str) -> Result<()> {
-        let mut result: u32 = 0;
         unsafe {
-            CngError::from_hresult(NCryptSetProperty(
-                self.inner(),
-                property,
-                ptr::null_mut(),
-                0,
-                0,
-            ))?;
-
             let prop_value = pin;
 
             CngError::from_hresult(NCryptSetProperty(
@@ -141,7 +132,7 @@ impl NCryptKey {
 
     /// Set PIN 
     pub fn set_pin(&self, pin: &str) -> Result<()> { 
-        self.set_string_property(NCRYPT_PIN_PROPERTY, pin)
+        self.set_string_property(NCRYPT_SECURE_PIN_PROPERTY, pin)
     }
 
     /// Return a number of bits in the key material
