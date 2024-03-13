@@ -194,6 +194,7 @@ impl NCryptKey {
 
             let mut result = 0;
 
+            // Not all drivers support the SILENT FLAG, so we remove it and use the Windows UI to trigger the PIN modal
             CngError::from_hresult(NCryptSignHash(
                 self.inner(),
                 info,
@@ -202,11 +203,12 @@ impl NCryptKey {
                 ptr::null_mut(),
                 0,
                 &mut result,
-                NCRYPT_SILENT_FLAG | flag,
+                flag, // NCRYPT_SILENT_FLAG |
             ))?;
 
             let mut signature = vec![0u8; result as usize];
 
+            // Not all drivers support the SILENT FLAG, so we remove it and use the Windows UI to trigger the PIN modal
             CngError::from_hresult(NCryptSignHash(
                 self.inner(),
                 info,
@@ -215,7 +217,7 @@ impl NCryptKey {
                 signature.as_mut_ptr(),
                 signature.len() as u32,
                 &mut result,
-                NCRYPT_SILENT_FLAG | flag,
+                flag, // NCRYPT_SILENT_FLAG |
             ))?;
 
             Ok(signature)

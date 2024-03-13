@@ -59,7 +59,7 @@ impl CertContext {
     pub fn acquire_key(&self) -> Result<NCryptKey> {
         let mut handle = HCRYPTPROV_OR_NCRYPT_KEY_HANDLE::default();
         let mut key_spec = CERT_KEY_SPEC::default();
-        let flags = CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG;
+        let flags = CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG; //| CRYPT_ACQUIRE_SILENT_FLAG
         unsafe {
             let result = CryptAcquireCertificatePrivateKey(
                 self.inner(),

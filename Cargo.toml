@@ -1,7 +1,7 @@
 [package]
 name = "rustls-cng"
 version = "0.4.0"
-authors = ["Dmitry Pankratov <dmitry@pankratov.net>"]
+authors = ["Dmitry Pankratov <dmitry@pankratov.net>, Michallis Pashidis <michallis@trust1team.com>"]
 description = "Windows CNG API bridge for rustls"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/rustls/rustls-cng"
