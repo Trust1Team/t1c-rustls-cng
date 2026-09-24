@@ -4,7 +4,7 @@ use std::{os::raw::c_void, ptr, str::FromStr, sync::Arc};
 
 use windows_sys::{Win32::Security::Cryptography::*, core::PCWSTR};
 
-use crate::{Result, error::CngError, utf16z};
+use crate::{Result, cert::CertContext, error::CngError, utf16z};
 
 /// Algorithm group of the CNG private key
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd)]
@@ -39,6 +39,7 @@ pub enum SignaturePadding {
 enum InnerKey {
     Owned(NCRYPT_KEY_HANDLE),
     Borrowed(NCRYPT_KEY_HANDLE),
+    CertificateOwned(NCRYPT_KEY_HANDLE, #[allow(dead_code)] CertContext),
 }
 
 impl InnerKey {
@@ -46,6 +47,7 @@ impl InnerKey {
         match self {
             Self::Owned(handle) => *handle,
             Self::Borrowed(handle) => *handle,
+            Self::CertificateOwned(handle, _) => *handle,
         }
     }
 }
@@ -57,6 +59,7 @@ impl Drop for InnerKey {
                 let _ = NCryptFreeObject(*handle);
             },
             Self::Borrowed(_) => {}
+            Self::CertificateOwned(_, _) => {}
         }
     }
 }
@@ -81,6 +84,13 @@ impl NCryptKey {
     pub fn new_borrowed(handle: NCRYPT_KEY_HANDLE) -> Self {
         NCryptKey {
             inner: Arc::new(InnerKey::Borrowed(handle)),
+            silent: true,
+        }
+    }
+
+    pub(crate) fn new_borrowed_with_context(handle: NCRYPT_KEY_HANDLE, context: CertContext) -> Self {
+        Self {
+            inner: Arc::new(InnerKey::CertificateOwned(handle, context)),
             silent: true,
         }
     }

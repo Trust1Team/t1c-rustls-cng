@@ -4,7 +4,14 @@ use std::{mem, ptr, slice, sync::Arc};
 
 use windows_sys::Win32::Security::Cryptography::*;
 
-use crate::{Result, error::CngError, key::NCryptKey};
+use crate::{Result, error::CngError, key::NCryptKey, legacy::LegacyCspKey};
+
+/// A certificate's private key may be backed by either Windows CNG or a legacy CryptoAPI CSP.
+#[derive(Debug, Clone)]
+pub enum AcquiredKey {
+    Cng(NCryptKey),
+    LegacyCsp(LegacyCspKey),
+}
 
 const HCCE_LOCAL_MACHINE: HCERTCHAINENGINE = 0x1 as HCERTCHAINENGINE;
 
@@ -57,12 +64,25 @@ impl CertContext {
         unsafe { &*self.0.inner() }
     }
 
-    /// Attempt to acquire a CNG private key from this context.
-    /// The `silent` parameter indicates whether to suppress the user prompts.
+    /// Acquire a CNG key. Unlike `acquire_signing_key`, this never returns a CSP handle.
     pub fn acquire_key(&self, silent: bool) -> Result<NCryptKey> {
+        match self.acquire_with_flags(silent, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG)? {
+            AcquiredKey::Cng(key) => Ok(key),
+            AcquiredKey::LegacyCsp(_) => Err(CngError::UnsupportedKeyProvider),
+        }
+    }
+
+    /// Acquire a CNG key if available, otherwise use a legacy CryptoAPI CSP.
+    /// A cancelled PIN prompt is returned as an error, not treated as a usable key.
+    pub fn acquire_signing_key(&self, silent: bool) -> Result<AcquiredKey> {
+        self.acquire_with_flags(silent, CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG)
+    }
+
+    fn acquire_with_flags(&self, silent: bool, provider_flags: u32) -> Result<AcquiredKey> {
         let mut handle = HCRYPTPROV_OR_NCRYPT_KEY_HANDLE::default();
         let mut key_spec = CERT_KEY_SPEC::default();
-        let flags = if silent { CRYPT_ACQUIRE_SILENT_FLAG } else { 0 } | CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG;
+        let mut caller_free = 0;
+        let flags = provider_flags | if silent { CRYPT_ACQUIRE_SILENT_FLAG } else { 0 };
 
         unsafe {
             let result = CryptAcquireCertificatePrivateKey(
@@ -71,14 +91,33 @@ impl CertContext {
                 ptr::null(),
                 &mut handle,
                 &mut key_spec,
-                ptr::null_mut(),
+                &mut caller_free,
             ) != 0;
-            if result {
-                let mut key = NCryptKey::new_owned(handle);
+            if !result {
+                return Err(CngError::from_win32_error());
+            }
+            if key_spec == CERT_NCRYPT_KEY_SPEC {
+                let mut key = if caller_free != 0 {
+                    NCryptKey::new_owned(handle)
+                } else {
+                    NCryptKey::new_borrowed_with_context(handle, self.clone())
+                };
                 key.set_silent(silent);
-                Ok(key)
+                Ok(AcquiredKey::Cng(key))
+            } else if key_spec == AT_SIGNATURE || key_spec == AT_KEYEXCHANGE {
+                Ok(AcquiredKey::LegacyCsp(LegacyCspKey::new(
+                    handle,
+                    key_spec,
+                    caller_free != 0,
+                    self.clone(),
+                    silent,
+                )))
             } else {
-                Err(CngError::from_win32_error())
+                // Do not guess the type of an unknown handle, nor pass it to NCryptFreeObject.
+                if caller_free != 0 {
+                    CryptReleaseContext(handle, 0);
+                }
+                Err(CngError::UnsupportedKeyProvider)
             }
         }
     }

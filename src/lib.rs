@@ -5,6 +5,7 @@ pub mod cert;
 pub mod config;
 pub mod error;
 pub mod key;
+pub mod legacy;
 pub mod signer;
 pub mod store;
 

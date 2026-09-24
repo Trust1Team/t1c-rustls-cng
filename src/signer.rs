@@ -12,7 +12,12 @@ use windows_sys::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CryptEncodeObjectEx, X509_ASN_ENCODING, X509_ECC_SIGNATURE,
 };
 
-use crate::key::{AlgorithmGroup, NCryptKey, SignaturePadding};
+use crate::{
+    cert::AcquiredKey,
+    error::CngError,
+    key::{AlgorithmGroup, NCryptKey, SignaturePadding},
+    legacy::LegacyCspKey,
+};
 
 // Convert an IEEE-P1363 (raw r || s) signature into DER encoding using the Win32 API.
 // CryptEncodeObjectEx with X509_ECC_SIGNATURE produces the DER `SEQUENCE { INTEGER r, INTEGER s }`,
@@ -143,8 +148,8 @@ struct CngSigner {
 
 impl CngSigner {
     // hash function using BCryptHash function which uses FIPS certified SymCrypt
-    fn hash(&self, message: &[u8]) -> Result<(Vec<u8>, SignaturePadding), Error> {
-        let (alg, padding) = match self.scheme {
+    fn hash_scheme(scheme: SignatureScheme, message: &[u8]) -> Result<(Vec<u8>, SignaturePadding), Error> {
+        let (alg, padding) = match scheme {
             SignatureScheme::RSA_PKCS1_SHA256 => (BCRYPT_SHA256_ALG_HANDLE, SignaturePadding::Pkcs1),
             SignatureScheme::RSA_PKCS1_SHA384 => (BCRYPT_SHA384_ALG_HANDLE, SignaturePadding::Pkcs1),
             SignatureScheme::RSA_PKCS1_SHA512 => (BCRYPT_SHA512_ALG_HANDLE, SignaturePadding::Pkcs1),
@@ -185,9 +190,113 @@ impl CngSigner {
     }
 }
 
+/// A rustls signing key backed by either a CNG KSP or a legacy CryptoAPI CSP.
+#[derive(Debug, Clone)]
+pub enum ProviderSigningKey {
+    Cng(CngSigningKey),
+    LegacyCsp {
+        key: LegacyCspKey,
+        supported_schemes: Vec<SignatureScheme>,
+    },
+}
+
+impl ProviderSigningKey {
+    /// Construct a provider-aware signer without treating a CSP handle as an NCrypt handle.
+    pub fn new(key: AcquiredKey) -> crate::Result<Self> {
+        match key {
+            AcquiredKey::Cng(key) => Ok(Self::Cng(CngSigningKey::new(key)?)),
+            AcquiredKey::LegacyCsp(key) => {
+                key.validate_rsa_key()?;
+                let supported_schemes = [
+                    (SignatureScheme::RSA_PKCS1_SHA256, 32),
+                    (SignatureScheme::RSA_PKCS1_SHA384, 48),
+                    (SignatureScheme::RSA_PKCS1_SHA512, 64),
+                ]
+                .into_iter()
+                .filter_map(|(scheme, length)| key.supports_hash(length).then_some(scheme))
+                .collect::<Vec<_>>();
+                if supported_schemes.is_empty() {
+                    return Err(CngError::UnsupportedKeyProvider);
+                }
+                Ok(Self::LegacyCsp { key, supported_schemes })
+            }
+        }
+    }
+
+    pub fn supported_schemes(&self) -> &[SignatureScheme] {
+        match self {
+            Self::Cng(key) => key.supported_schemes(),
+            Self::LegacyCsp { supported_schemes, .. } => supported_schemes,
+        }
+    }
+
+    /// Supply a PIN to the appropriate provider before signing.
+    pub fn set_pin(&self, pin: &str) -> crate::Result<()> {
+        match self {
+            Self::Cng(key) => key.key().set_pin(pin),
+            Self::LegacyCsp { key, .. } => key.set_pin(pin),
+        }
+    }
+
+    /// Sign an already computed SHA-2 digest with RSA PKCS#1 v1.5.
+    /// Other CNG operations remain available through `CngSigningKey::key`.
+    pub fn sign_rsa_pkcs1(&self, digest: &[u8]) -> crate::Result<Vec<u8>> {
+        match self {
+            Self::Cng(key) if key.algorithm_group() == AlgorithmGroup::Rsa => {
+                key.key().sign(digest, SignaturePadding::Pkcs1)
+            }
+            Self::Cng(_) => Err(CngError::UnsupportedKeyAlgorithmGroup),
+            Self::LegacyCsp { key, .. } => key.sign(digest),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LegacySigner {
+    key: LegacyCspKey,
+    scheme: SignatureScheme,
+}
+
+impl Signer for LegacySigner {
+    fn sign(self: Box<Self>, message: &[u8]) -> Result<Vec<u8>, Error> {
+        let (hash, padding) = CngSigner::hash_scheme(self.scheme, message)?;
+        if padding != SignaturePadding::Pkcs1 {
+            return Err(Error::General("Unsupported legacy CSP signature scheme".to_owned()));
+        }
+        self.key
+            .sign(&hash)
+            .map_err(|e| Error::Other(OtherError::new(Arc::new(e))))
+    }
+
+    fn scheme(&self) -> SignatureScheme {
+        self.scheme
+    }
+}
+
+impl SigningKey for ProviderSigningKey {
+    fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+        match self {
+            Self::Cng(key) => key.choose_scheme(offered),
+            Self::LegacyCsp { key, supported_schemes } => offered
+                .iter()
+                .find(|scheme| supported_schemes.contains(scheme))
+                .map(|scheme| {
+                    Box::new(LegacySigner {
+                        key: key.clone(),
+                        scheme: *scheme,
+                    }) as Box<dyn Signer>
+                }),
+        }
+    }
+
+    fn public_key(&self) -> Option<SubjectPublicKeyInfoDer<'_>> {
+        None
+    }
+}
+
 impl Signer for CngSigner {
     fn sign(self: Box<CngSigner>, message: &[u8]) -> Result<Vec<u8>, Error> {
-        let (hash, padding) = self.hash(message)?;
+        let (hash, padding) = Self::hash_scheme(self.scheme, message)?;
         let mut signature = self
             .key
             .sign(&hash, padding)

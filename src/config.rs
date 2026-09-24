@@ -9,13 +9,59 @@ use rustls::{
     server::{ClientHello, ServerCredentialResolver, WantsServerCert},
 };
 
-use crate::{key::NCryptKey, signer::CngSigningKey};
+use crate::{
+    cert::AcquiredKey,
+    key::NCryptKey,
+    signer::{CngSigningKey, ProviderSigningKey},
+};
 
 /// CNG credentials with a private key and a certificate chain.
 #[derive(Clone, Debug)]
 pub struct CngCredentials {
     pub key: NCryptKey,
     pub chain: Vec<CertificateDer<'static>>,
+}
+
+/// Credentials backed by either a CNG key or a legacy CryptoAPI CSP.
+#[derive(Clone, Debug)]
+pub struct ProviderCredentials {
+    pub key: AcquiredKey,
+    pub chain: Vec<CertificateDer<'static>>,
+}
+
+/// Add credentials acquired using `CertContext::acquire_signing_key`.
+pub trait WithClientProviderCredentials {
+    fn with_client_provider_credentials(self, credentials: ProviderCredentials) -> Result<ClientConfig, Error>;
+}
+
+impl WithClientProviderCredentials for ConfigBuilder<ClientConfig, WantsClientCert> {
+    fn with_client_provider_credentials(self, credentials: ProviderCredentials) -> Result<ClientConfig, Error> {
+        let key = ProviderSigningKey::new(credentials.key).map_err(|_| Error::NoSuitableCertificate)?;
+        let identity = Identity::from_cert_chain(credentials.chain)?;
+        self.with_client_credential_resolver(Arc::new(ProviderClientCertResolver {
+            key,
+            identity: Arc::new(identity),
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct ProviderClientCertResolver {
+    key: ProviderSigningKey,
+    identity: Arc<Identity<'static>>,
+}
+
+impl ClientCredentialResolver for ProviderClientCertResolver {
+    fn resolve(&self, request: &CredentialRequest<'_>) -> Option<SelectedCredential> {
+        Credentials::new_unchecked(self.identity.clone(), Box::new(self.key.clone()))
+            .signer(request.signature_schemes())
+    }
+
+    fn supported_certificate_types(&self) -> &'static [CertificateType] {
+        &[CertificateType::X509]
+    }
+
+    fn hash_config(&self, _h: &mut dyn Hasher) {}
 }
 
 /// Extension trait for `ConfigBuilder` to add CNG client credentials.
@@ -94,5 +140,42 @@ where
         )
         .signer(client_hello.signature_schemes())
         .ok_or_else(|| Error::General("No common schemes".to_owned()))
+    }
+}
+
+/// Register a resolver for certificates backed by either CNG or a legacy CSP.
+pub trait WithServerProviderCredentials {
+    fn with_server_provider_credentials<F>(self, resolver: F) -> Result<ServerConfig, Error>
+    where
+        F: Fn(&ClientHello) -> Result<ProviderCredentials, Error> + Send + Sync + 'static;
+}
+
+impl WithServerProviderCredentials for ConfigBuilder<ServerConfig, WantsServerCert> {
+    fn with_server_provider_credentials<F>(self, resolver: F) -> Result<ServerConfig, Error>
+    where
+        F: Fn(&ClientHello) -> Result<ProviderCredentials, Error> + Send + Sync + 'static,
+    {
+        self.with_server_credential_resolver(Arc::new(ProviderServerCertResolver(resolver)))
+    }
+}
+
+struct ProviderServerCertResolver<F>(F);
+
+impl<F> fmt::Debug for ProviderServerCertResolver<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderServerCertResolver").finish()
+    }
+}
+
+impl<F> ServerCredentialResolver for ProviderServerCertResolver<F>
+where
+    F: Fn(&ClientHello) -> Result<ProviderCredentials, Error> + Send + Sync + 'static,
+{
+    fn resolve(&self, client_hello: &ClientHello<'_>) -> Result<SelectedCredential, Error> {
+        let credentials = self.0(client_hello)?;
+        let key = ProviderSigningKey::new(credentials.key).map_err(|_| Error::NoSuitableCertificate)?;
+        Credentials::new_unchecked(Arc::new(Identity::from_cert_chain(credentials.chain)?), Box::new(key))
+            .signer(client_hello.signature_schemes())
+            .ok_or_else(|| Error::General("No common schemes".to_owned()))
     }
 }

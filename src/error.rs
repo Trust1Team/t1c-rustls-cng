@@ -13,6 +13,8 @@ use windows_sys::{
 pub enum CngError {
     InvalidHashLength,
     UnsupportedKeyAlgorithmGroup,
+    UnsupportedKeyProvider,
+    InvalidPinEncoding,
     WindowsError(u32),
 }
 
@@ -21,6 +23,8 @@ impl fmt::Display for CngError {
         match self {
             CngError::InvalidHashLength => write!(f, "Invalid hash length"),
             CngError::UnsupportedKeyAlgorithmGroup => write!(f, "Unsupported key algorithm group"),
+            CngError::UnsupportedKeyProvider => write!(f, "Unsupported key provider"),
+            CngError::InvalidPinEncoding => write!(f, "Legacy CSP PIN must be NUL-free ASCII"),
             CngError::WindowsError(code) => write!(f, "Error code {code:08x}"),
         }
     }

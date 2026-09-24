@@ -25,6 +25,47 @@ The main struct to use in `rustls-cng` is `CngSigningKey`, which can be construc
 
 See the `examples` directory for usage examples.
 
+### Legacy CryptoAPI CSP tokens (feature/support-legacy)
+
+`CertContext::acquire_key(silent)` remains CNG-only. To accept either a CNG KSP
+or a legacy CryptoAPI CSP, use `CertContext::acquire_signing_key(silent)` and
+pass its `AcquiredKey` to `ProviderSigningKey::new`. The `AcquiredKey` variant
+identifies the provider; do not wrap a CSP handle in `NCryptKey`.
+
+```rust
+use rustls_cng::{cert::AcquiredKey, signer::ProviderSigningKey};
+
+let acquired = context.acquire_signing_key(false)?; // UI permitted
+let provider = match &acquired {
+    AcquiredKey::Cng(_) => "CNG",
+    AcquiredKey::LegacyCsp(_) => "CryptoAPI CSP",
+};
+// Log the provider name, not the PIN or private key.
+println!("Signing provider: {provider}");
+let key = ProviderSigningKey::new(acquired)?;
+// Optional: key.set_pin(pin)?; only set a PIN if the provider supports it.
+let signature = key.sign_rsa_pkcs1(&sha256_digest)?;
+```
+
+The legacy path currently supports **RSA PKCS#1 v1.5** with SHA-256, SHA-384,
+or SHA-512 when the CSP supports the hash. It does not support RSA-PSS or
+legacy CSP ECDSA. A successful hash capability probe does not guarantee
+hardware-token signing or PIN authentication. CSP-backed RSA cannot sign the
+RSA-PSS CertificateVerify required by TLS 1.3: configure TLS 1.2 only when
+using `ProviderCredentials` with a legacy CSP for TLS authentication. The
+provider-aware client/server configuration helpers do **not** change protocol
+versions on your behalf.
+
+`silent: false` permits Windows/provider prompts; `silent: true` suppresses
+prompts during key acquisition. If acquisition fails (including a cancelled
+prompt), no PIN can be set through the returned-key APIs. Test the QuoVadis
+middleware under the same interactive Windows account as the caller.
+
+This development branch changes the fork's `dev` API (rustls development
+dependency). Applications pinned to an older tag must explicitly update
+their dependency and adapt to its rustls API; merely pushing this branch
+does not change the version used by an existing application.
+
 ## License
 
 Licensed under the MIT or Apache licenses ([LICENSE-MIT](https://opensource.org/licenses/MIT) or [LICENSE-APACHE](https://opensource.org/licenses/Apache-2.0))
