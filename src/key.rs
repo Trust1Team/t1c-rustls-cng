@@ -2,15 +2,12 @@
 
 use std::{os::raw::c_void, ptr, str::FromStr, sync::Arc};
 
-use windows_sys::{
-    core::PCWSTR,
-    Win32::Security::{Cryptography::*, OBJECT_SECURITY_INFORMATION},
-};
+use windows_sys::{Win32::Security::Cryptography::*, core::PCWSTR};
 
-use crate::{error::CngError, Result};
+use crate::{Result, error::CngError, utf16z};
 
 /// Algorithm group of the CNG private key
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd)]
 pub enum AlgorithmGroup {
     Rsa,
     Ecdsa,
@@ -66,22 +63,31 @@ impl Drop for InnerKey {
 
 /// CNG private key wrapper
 #[derive(Clone, Debug)]
-pub struct NCryptKey(Arc<InnerKey>);
+pub struct NCryptKey {
+    inner: Arc<InnerKey>,
+    silent: bool,
+}
 
 impl NCryptKey {
     /// Create an owned instance which frees the underlying handle automatically
     pub fn new_owned(handle: NCRYPT_KEY_HANDLE) -> Self {
-        NCryptKey(Arc::new(InnerKey::Owned(handle)))
+        NCryptKey {
+            inner: Arc::new(InnerKey::Owned(handle)),
+            silent: true,
+        }
     }
 
     /// Create a borrowed instance which doesn't free the key handle
     pub fn new_borrowed(handle: NCRYPT_KEY_HANDLE) -> Self {
-        NCryptKey(Arc::new(InnerKey::Borrowed(handle)))
+        NCryptKey {
+            inner: Arc::new(InnerKey::Borrowed(handle)),
+            silent: true,
+        }
     }
 
     /// Return an inner CNG key handle
     pub fn inner(&self) -> NCRYPT_KEY_HANDLE {
-        self.0.inner()
+        self.inner.inner()
     }
 
     fn get_string_property(&self, property: PCWSTR) -> Result<String> {
@@ -93,46 +99,29 @@ impl NCryptKey {
                 ptr::null_mut(),
                 0,
                 &mut result,
-                OBJECT_SECURITY_INFORMATION::default(),
+                NCRYPT_FLAGS::default(),
             ))?;
 
-            let mut prop_value = vec![0u8; result as usize];
+            // CNG reports the size in bytes; allocate u16s so the buffer is 2-byte aligned.
+            let mut prop_value = vec![0u16; (result as usize).div_ceil(2)];
 
             CngError::from_hresult(NCryptGetProperty(
                 self.inner(),
                 property,
-                prop_value.as_mut_ptr(),
-                prop_value.len() as u32,
+                prop_value.as_mut_ptr().cast(),
+                (prop_value.len() * 2) as u32,
                 &mut result,
-                OBJECT_SECURITY_INFORMATION::default(),
+                NCRYPT_FLAGS::default(),
             ))?;
 
-            Ok(String::from_utf16_lossy(std::slice::from_raw_parts(
-                prop_value.as_ptr() as *const u16,
-                prop_value.len() / 2 - 1,
-            )))
+            // result is the number of bytes actually written; drop the trailing NUL if present.
+            let mut len = result as usize / 2;
+            if prop_value.get(len.wrapping_sub(1)) == Some(&0) {
+                len -= 1;
+            }
+
+            Ok(String::from_utf16_lossy(&prop_value[..len]))
         }
-    }
-
-    fn set_string_property(&self, property: PCWSTR, pin: &str) -> Result<()> {
-        unsafe {
-            let prop_value = pin;
-
-            CngError::from_hresult(NCryptSetProperty(
-                self.inner(),
-                property,
-                prop_value.as_ptr(),
-                prop_value.len() as u32,
-                0,
-            ))?;
-
-            Ok(())
-        }
-    }
-
-    /// Set PIN 
-    pub fn set_pin(&self, pin: &str) -> Result<()> { 
-        self.set_string_property(NCRYPT_SECURE_PIN_PROPERTY, pin)
     }
 
     /// Return a number of bits in the key material
@@ -146,7 +135,7 @@ impl NCryptKey {
                 bits.as_mut_ptr(),
                 4,
                 &mut result,
-                OBJECT_SECURITY_INFORMATION::default(),
+                NCRYPT_FLAGS::default(),
             ))?;
 
             Ok(u32::from_ne_bytes(bits))
@@ -155,8 +144,7 @@ impl NCryptKey {
 
     /// Return algorithm group of the key
     pub fn algorithm_group(&self) -> Result<AlgorithmGroup> {
-        self.get_string_property(NCRYPT_ALGORITHM_GROUP_PROPERTY)?
-            .parse()
+        self.get_string_property(NCRYPT_ALGORITHM_GROUP_PROPERTY)?.parse()
     }
 
     /// Return algorithm name of the key
@@ -164,7 +152,29 @@ impl NCryptKey {
         self.get_string_property(NCRYPT_ALGORITHM_PROPERTY)
     }
 
-    /// Sign a given digest with this key. The `hash` slice must be 32, 48 or 64 bytes long.
+    /// Set a pin code for hardware tokens
+    pub fn set_pin(&self, pin: &str) -> Result<()> {
+        let pin_val = utf16z!(pin);
+
+        let result = unsafe {
+            NCryptSetProperty(
+                self.inner(),
+                NCRYPT_PIN_PROPERTY,
+                pin_val.as_ptr().cast(),
+                (pin_val.len() * 2) as u32,
+                NCRYPT_FLAGS::default(),
+            )
+        };
+
+        CngError::from_hresult(result)
+    }
+
+    /// Enable or disable silent key operations without prompting the user. The default value is 'true'.
+    pub fn set_silent(&mut self, silent: bool) {
+        self.silent = silent;
+    }
+
+    /// Sign a given digest with this key. The `hash` slice must be 32, 48, or 64 bytes long.
     pub fn sign(&self, hash: &[u8], padding: SignaturePadding) -> Result<Vec<u8>> {
         unsafe {
             let hash_alg = match hash.len() {
@@ -193,8 +203,8 @@ impl NCryptKey {
             };
 
             let mut result = 0;
+            let dwflags = flag | if self.silent { NCRYPT_SILENT_FLAG } else { 0 };
 
-            // Not all drivers support the SILENT FLAG, so we remove it and use the Windows UI to trigger the PIN modal
             CngError::from_hresult(NCryptSignHash(
                 self.inner(),
                 info,
@@ -203,12 +213,11 @@ impl NCryptKey {
                 ptr::null_mut(),
                 0,
                 &mut result,
-                flag, // NCRYPT_SILENT_FLAG |
+                dwflags,
             ))?;
 
             let mut signature = vec![0u8; result as usize];
 
-            // Not all drivers support the SILENT FLAG, so we remove it and use the Windows UI to trigger the PIN modal
             CngError::from_hresult(NCryptSignHash(
                 self.inner(),
                 info,
@@ -217,7 +226,7 @@ impl NCryptKey {
                 signature.as_mut_ptr(),
                 signature.len() as u32,
                 &mut result,
-                flag, // NCRYPT_SILENT_FLAG |
+                dwflags,
             ))?;
 
             Ok(signature)

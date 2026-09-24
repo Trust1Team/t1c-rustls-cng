@@ -1,24 +1,37 @@
 [package]
 name = "rustls-cng"
-version = "0.4.0"
+version = "0.8.0-dev"
 authors = ["Dmitry Pankratov <dmitry@pankratov.net>"]
 description = "Windows CNG API bridge for rustls"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/rustls/rustls-cng"
-documentation = "https://rustls.github.io/rustls-cng/doc/rustls_cng"
+documentation = "https://docs.rs/rustls-cng"
 readme = "README.md"
 keywords = ["cng", "tls", "rustls", "windows"]
-edition = "2021"
+edition = "2024"
+publish = false
 
 [package.metadata.docs.rs]
-targets = ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"]
+default-target = "x86_64-pc-windows-msvc"
+no-default-features = true
+features = ["time"]
 
 [dependencies]
-rustls = "0.22"
 sha2 = "0.10"
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+rustls = { git = "https://github.com/rustls/rustls.git", default-features = false }
+time = { version = "0.3", default-features = false, optional = true }
+bitflags = "2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-rustls-pki-types = "1"
+rustls-aws-lc-rs = { git = "https://github.com/rustls/rustls.git" }
+rustls-util = { git = "https://github.com/rustls/rustls.git" }
+rustls-native-certs = "0.8"
+
+[features]
+default = ["rustls-tracing", "rustls-webpki"]
+time = ["dep:time"]
+rustls-webpki= ["rustls/webpki"]
+rustls-tracing = ["rustls/tracing"]
+rustls-brotli = ["rustls/brotli"]
+rustls-zlib = ["rustls/zlib"]

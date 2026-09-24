@@ -10,61 +10,29 @@ mod client {
         sync::Arc,
     };
 
-    use rustls::{
-        client::ResolvesClientCert, sign::CertifiedKey, ClientConfig, ClientConnection,
-        RootCertStore, SignatureScheme, Stream,
+    use rustls::{ClientConfig, RootCertStore, pki_types::CertificateDer};
+    use rustls_cng::{
+        config::{CngCredentials, WithClientCngCredentials},
+        key::NCryptKey,
+        store::{CertStore, Pkcs12Flags},
     };
-    use rustls_pki_types::CertificateDer;
-
-    use rustls_cng::{signer::CngSigningKey, store::CertStore};
-
-    #[derive(Debug)]
-    pub struct ClientCertResolver(CertStore, String);
+    use rustls_util::StreamOwned;
 
     fn get_chain(
         store: &CertStore,
         name: &str,
-    ) -> anyhow::Result<(Vec<CertificateDer<'static>>, CngSigningKey)> {
+    ) -> Result<(Vec<CertificateDer<'static>>, NCryptKey), Box<dyn std::error::Error>> {
         let contexts = store.find_by_subject_str(name)?;
         let context = contexts
             .first()
-            .ok_or_else(|| anyhow::Error::msg("No client cert"))?;
-        let key = context.acquire_key()?;
-        let signing_key = CngSigningKey::new(key)?;
-        let chain = context
-            .as_chain_der()?
-            .into_iter()
-            .map(Into::into)
-            .collect();
-        Ok((chain, signing_key))
+            .ok_or_else(|| std::io::Error::other("No client cert"))?;
+        let key = context.acquire_key(true)?;
+        let chain = context.as_chain_der()?.into_iter().map(Into::into).collect();
+        Ok((chain, key))
     }
 
-    impl ResolvesClientCert for ClientCertResolver {
-        fn resolve(
-            &self,
-            _acceptable_issuers: &[&[u8]],
-            sigschemes: &[SignatureScheme],
-        ) -> Option<Arc<CertifiedKey>> {
-            let (chain, signing_key) = get_chain(&self.0, &self.1).ok()?;
-            for scheme in signing_key.supported_schemes() {
-                if sigschemes.contains(scheme) {
-                    return Some(Arc::new(CertifiedKey {
-                        cert: chain,
-                        key: Arc::new(signing_key),
-                        ocsp: None,
-                    }));
-                }
-            }
-            None
-        }
-
-        fn has_certs(&self) -> bool {
-            true
-        }
-    }
-
-    pub fn run_client(port: u16) -> anyhow::Result<()> {
-        let store = CertStore::from_pkcs12(super::CLIENT_PFX, super::PASSWORD)?;
+    pub fn run_client(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+        let store = CertStore::from_pkcs12(super::CLIENT_PFX, super::PASSWORD, Pkcs12Flags::default())?;
 
         let ca_cert_context = store.find_by_subject_str(super::CA_SUBJECT)?;
         let ca_cert = ca_cert_context.first().unwrap();
@@ -72,19 +40,25 @@ mod client {
         let mut root_store = RootCertStore::empty();
         root_store.add(ca_cert.as_der().into())?;
 
-        let client_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_client_cert_resolver(Arc::new(ClientCertResolver(
-                store,
-                "rustls-client".to_string(),
-            )));
+        let (certs, key) = get_chain(&store, "rustls-client")?;
+        let credentials = CngCredentials { key, chain: certs };
 
-        let mut connection =
-            ClientConnection::new(Arc::new(client_config), "rustls-server".try_into()?)?;
+        let client_config = Arc::new(
+            ClientConfig::builder(Arc::new(rustls_aws_lc_rs::DEFAULT_PROVIDER))
+                .with_root_certificates(root_store)
+                .with_client_cng_credentials(credentials)?,
+        );
 
-        let mut client = TcpStream::connect(format!("localhost:{}", port))?;
+        let mut client_output = Vec::new();
 
-        let mut tls_stream = Stream::new(&mut connection, &mut client);
+        let connection = client_config
+            .connect("rustls-server".try_into()?)
+            .build(&mut client_output)?;
+
+        let client = TcpStream::connect(format!("localhost:{port}"))?;
+
+        let mut tls_stream = StreamOwned::new(connection, client, client_output);
+
         tls_stream.write_all(b"ping")?;
         tls_stream.sock.shutdown(Shutdown::Write)?;
 
@@ -102,58 +76,61 @@ mod server {
     use std::{
         io::{Read, Write},
         net::{Shutdown, TcpListener, TcpStream},
-        sync::{mpsc::Sender, Arc},
+        sync::{Arc, mpsc::Sender},
     };
 
     use rustls::{
-        server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier},
-        sign::CertifiedKey,
-        RootCertStore, ServerConfig, ServerConnection, Stream,
+        RootCertStore, ServerConfig, ServerConnection,
+        server::{ClientHello, WebPkiClientVerifier},
     };
+    use rustls_cng::{
+        config::{CngCredentials, WithServerCngCredentials},
+        store::{CertStore, Pkcs12Flags},
+    };
+    use rustls_util::StreamOwned;
 
-    use rustls_cng::{signer::CngSigningKey, store::CertStore};
+    fn resolve(store: &CertStore, client_hello: &ClientHello) -> Result<CngCredentials, rustls::Error> {
+        let name = client_hello
+            .server_name()
+            .ok_or_else(|| rustls::Error::NoSuitableCertificate)?;
 
-    #[derive(Debug)]
-    pub struct ServerCertResolver(CertStore);
+        let contexts = store
+            .find_by_subject_str(name)
+            .map_err(|_| rustls::Error::NoSuitableCertificate)?;
 
-    impl ResolvesServerCert for ServerCertResolver {
-        fn resolve(&self, client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
-            let name = client_hello.server_name()?;
+        let (context, key) = contexts
+            .into_iter()
+            .find_map(|ctx| ctx.acquire_key(true).ok().map(|key| (ctx, key)))
+            .ok_or_else(|| rustls::Error::NoSuitableCertificate)?;
 
-            let contexts = self.0.find_by_subject_str(name).ok()?;
+        let chain = context
+            .as_chain_der()
+            .map_err(|_| rustls::Error::NoSuitableCertificate)?;
+        let certs = chain.into_iter().map(Into::into).collect();
 
-            let (context, key) = contexts.into_iter().find_map(|ctx| {
-                let key = ctx.acquire_key().ok()?;
-                CngSigningKey::new(key).ok().map(|key| (ctx, key))
-            })?;
-
-            let chain = context.as_chain_der().ok()?;
-            let certs = chain.into_iter().map(Into::into).collect();
-
-            Some(Arc::new(CertifiedKey {
-                cert: certs,
-                key: Arc::new(key),
-                ocsp: None,
-            }))
-        }
+        Ok(CngCredentials { key, chain: certs })
     }
 
-    fn handle_connection(mut stream: TcpStream, config: Arc<ServerConfig>) -> anyhow::Result<()> {
-        let mut connection = ServerConnection::new(config)?;
-        let mut tls_stream = Stream::new(&mut connection, &mut stream);
+    fn handle_connection(stream: TcpStream, config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error::Error>> {
+        let connection = ServerConnection::new(config)?;
+        let mut tls_stream = StreamOwned::new(connection, stream, Vec::new());
 
         let mut buf = [0u8; 4];
         tls_stream.read_exact(&mut buf)?;
+
         assert_eq!(&buf, b"ping");
+
         tls_stream.sock.shutdown(Shutdown::Read)?;
+
         tls_stream.write_all(b"pong")?;
+
         tls_stream.sock.shutdown(Shutdown::Write)?;
 
         Ok(())
     }
 
-    pub fn run_server(sender: Sender<u16>) -> anyhow::Result<()> {
-        let store = CertStore::from_pkcs12(super::SERVER_PFX, super::PASSWORD)?;
+    pub fn run_server(sender: Sender<u16>) -> Result<(), Box<dyn std::error::Error>> {
+        let store = CertStore::from_pkcs12(super::SERVER_PFX, super::PASSWORD, Pkcs12Flags::default())?;
 
         let ca_cert_context = store.find_by_subject_str(super::CA_SUBJECT)?;
         let ca_cert = ca_cert_context.first().unwrap();
@@ -161,13 +138,12 @@ mod server {
         let mut root_store = RootCertStore::empty();
         root_store.add(ca_cert.as_der().into())?;
 
-        let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-            .build()
-            .unwrap();
+        let verifier =
+            WebPkiClientVerifier::builder(Arc::new(root_store), &rustls_aws_lc_rs::DEFAULT_PROVIDER).build()?;
 
-        let server_config = ServerConfig::builder()
-            .with_client_cert_verifier(verifier)
-            .with_cert_resolver(Arc::new(ServerCertResolver(store)));
+        let server_config = ServerConfig::builder(Arc::new(rustls_aws_lc_rs::DEFAULT_PROVIDER))
+            .with_client_cert_verifier(Arc::new(verifier))
+            .with_server_cng_credentials(move |hello| resolve(&store, hello))?;
 
         let server = TcpListener::bind("127.0.0.1:0")?;
 
@@ -186,10 +162,10 @@ fn test_client_server() {
     let (tx, rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
-        assert!(server::run_server(tx).is_ok());
+        server::run_server(tx).expect("server test failed");
     });
 
     if let Ok(port) = rx.recv() {
-        client::run_client(port).unwrap();
+        client::run_client(port).expect("client test failed");
     }
 }

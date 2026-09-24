@@ -1,0 +1,98 @@
+use std::{fmt, hash::Hasher, sync::Arc};
+
+use rustls::{
+    ClientConfig, ConfigBuilder, Error, ServerConfig,
+    client::{ClientCredentialResolver, CredentialRequest, WantsClientCert},
+    crypto::{Credentials, Identity, SelectedCredential},
+    enums::CertificateType,
+    pki_types::CertificateDer,
+    server::{ClientHello, ServerCredentialResolver, WantsServerCert},
+};
+
+use crate::{key::NCryptKey, signer::CngSigningKey};
+
+/// CNG credentials with a private key and a certificate chain.
+#[derive(Clone, Debug)]
+pub struct CngCredentials {
+    pub key: NCryptKey,
+    pub chain: Vec<CertificateDer<'static>>,
+}
+
+/// Extension trait for `ConfigBuilder` to add CNG client credentials.
+pub trait WithClientCngCredentials {
+    /// Add client CNG credentials.
+    fn with_client_cng_credentials(self, credentials: CngCredentials) -> Result<ClientConfig, Error>;
+}
+
+impl WithClientCngCredentials for ConfigBuilder<ClientConfig, WantsClientCert> {
+    fn with_client_cng_credentials(self, credentials: CngCredentials) -> Result<ClientConfig, Error> {
+        let key = CngSigningKey::new(credentials.key).map_err(|_| Error::NoSuitableCertificate)?;
+        let identity = Identity::from_cert_chain(credentials.chain)?;
+        self.with_client_credential_resolver(Arc::new(ClientCertResolver {
+            key,
+            identity: Arc::new(identity),
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct ClientCertResolver {
+    key: CngSigningKey,
+    identity: Arc<Identity<'static>>,
+}
+
+impl ClientCredentialResolver for ClientCertResolver {
+    fn resolve(&self, request: &CredentialRequest<'_>) -> Option<SelectedCredential> {
+        Credentials::new_unchecked(self.identity.clone(), Box::new(self.key.clone()))
+            .signer(request.signature_schemes())
+    }
+
+    fn supported_certificate_types(&self) -> &'static [CertificateType] {
+        &[CertificateType::X509]
+    }
+
+    fn hash_config(&self, _h: &mut dyn Hasher) {}
+}
+
+/// Extension trait for ConfigBuilder to add CNG server credentials.
+pub trait WithServerCngCredentials {
+    /// Register server CNG credentials resolver function.
+    fn with_server_cng_credentials<F>(self, resolver: F) -> Result<ServerConfig, Error>
+    where
+        F: Fn(&ClientHello) -> Result<CngCredentials, Error> + Send + Sync + 'static;
+}
+
+impl WithServerCngCredentials for ConfigBuilder<ServerConfig, WantsServerCert> {
+    fn with_server_cng_credentials<F>(self, resolver: F) -> Result<ServerConfig, Error>
+    where
+        F: Fn(&ClientHello) -> Result<CngCredentials, Error> + Send + Sync + 'static,
+    {
+        self.with_server_credential_resolver(Arc::new(ServerCertResolver(resolver)))
+    }
+}
+
+struct ServerCertResolver<F>(F);
+
+impl<F> fmt::Debug for ServerCertResolver<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerCertResolver").finish()
+    }
+}
+
+impl<F> ServerCredentialResolver for ServerCertResolver<F>
+where
+    F: Fn(&ClientHello) -> Result<CngCredentials, Error> + Send + Sync + 'static,
+{
+    fn resolve(&self, client_hello: &ClientHello<'_>) -> Result<SelectedCredential, Error> {
+        let credentials = self.0(client_hello)?;
+
+        let signing_key = CngSigningKey::new(credentials.key).map_err(|_| Error::NoSuitableCertificate)?;
+
+        Credentials::new_unchecked(
+            Arc::new(Identity::from_cert_chain(credentials.chain)?),
+            Box::new(signing_key),
+        )
+        .signer(client_hello.signature_schemes())
+        .ok_or_else(|| Error::General("No common schemes".to_owned()))
+    }
+}

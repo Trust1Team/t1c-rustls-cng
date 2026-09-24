@@ -3,8 +3,8 @@
 use std::fmt;
 
 use windows_sys::{
+    Win32::Foundation::{ERROR_SUCCESS, GetLastError, WIN32_ERROR},
     core::HRESULT,
-    Win32::Foundation::{GetLastError, ERROR_SUCCESS, WIN32_ERROR},
 };
 
 /// Errors that may be returned in this crate
@@ -21,7 +21,7 @@ impl fmt::Display for CngError {
         match self {
             CngError::InvalidHashLength => write!(f, "Invalid hash length"),
             CngError::UnsupportedKeyAlgorithmGroup => write!(f, "Unsupported key algorithm group"),
-            CngError::WindowsError(code) => write!(f, "Error code {:08x}", code),
+            CngError::WindowsError(code) => write!(f, "Error code {code:08x}"),
         }
     }
 }

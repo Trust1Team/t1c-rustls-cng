@@ -1,6 +1,8 @@
-use rustls::{sign::SigningKey, SignatureAlgorithm, SignatureScheme};
-
-use rustls_cng::{signer::CngSigningKey, store::CertStore};
+use rustls::crypto::{SignatureScheme, SigningKey};
+use rustls_cng::{
+    signer::CngSigningKey,
+    store::{CertStore, Pkcs12Flags},
+};
 
 const PFX: &[u8] = include_bytes!("assets/rustls-ec.p12");
 const PASSWORD: &str = "changeit";
@@ -8,7 +10,7 @@ const MESSAGE: &str = "Security is our business";
 
 #[test]
 fn test_sign() {
-    let store = CertStore::from_pkcs12(PFX, PASSWORD).expect("Cannot open cert store");
+    let store = CertStore::from_pkcs12(PFX, PASSWORD, Pkcs12Flags::default()).expect("Cannot open cert store");
 
     let context = store
         .find_by_subject_str("rustls")
@@ -26,11 +28,11 @@ fn test_sign() {
         SignatureScheme::RSA_PSS_SHA512,
         SignatureScheme::ECDSA_NISTP256_SHA256,
         SignatureScheme::ECDSA_NISTP384_SHA384,
+        SignatureScheme::ECDSA_NISTP521_SHA512,
     ];
 
-    let key = context.acquire_key().unwrap();
+    let key = context.acquire_key(true).unwrap();
     let signing_key = CngSigningKey::new(key).unwrap();
-    assert_eq!(signing_key.algorithm(), SignatureAlgorithm::ECDSA);
     let signer = signing_key.choose_scheme(&offered).unwrap();
     assert_eq!(signer.scheme(), SignatureScheme::ECDSA_NISTP384_SHA384);
 

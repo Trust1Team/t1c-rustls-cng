@@ -1,137 +1,57 @@
 use std::{
     io::{Read, Write},
     net::{Shutdown, TcpStream},
-    path::PathBuf,
     sync::Arc,
 };
 
-use clap::Parser;
-use rustls::{
-    client::ResolvesClientCert, sign::CertifiedKey, ClientConfig, ClientConnection, RootCertStore,
-    SignatureScheme, Stream,
-};
-use rustls_pki_types::{CertificateDer, ServerName};
-
+use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use rustls_cng::{
-    signer::CngSigningKey,
+    config::{CngCredentials, WithClientCngCredentials},
     store::{CertStore, CertStoreType},
 };
+use rustls_util::StreamOwned;
 
 const PORT: u16 = 8000;
 
-#[derive(Debug)]
-pub struct ClientCertResolver(CertStore, String);
-
-fn get_chain(
-    store: &CertStore,
-    name: &str,
-) -> anyhow::Result<(Vec<CertificateDer<'static>>, CngSigningKey)> {
+fn get_credentials(name: &str) -> Result<CngCredentials, Box<dyn std::error::Error>> {
+    let store = CertStore::open(CertStoreType::CurrentUser, "my")?;
     let contexts = store.find_by_subject_str(name)?;
     let context = contexts
         .first()
-        .ok_or_else(|| anyhow::Error::msg("No client cert"))?;
-    let key = context.acquire_key()?;
-    let signing_key = CngSigningKey::new(key)?;
-    let chain = context
-        .as_chain_der()?
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    Ok((chain, signing_key))
+        .ok_or_else(|| std::io::Error::other("No client cert"))?;
+    let key = context.acquire_key(false)?;
+    let chain = context.as_chain_der()?.into_iter().map(Into::into).collect();
+    Ok(CngCredentials { key, chain })
 }
 
-impl ResolvesClientCert for ClientCertResolver {
-    fn resolve(
-        &self,
-        _acceptable_issuers: &[&[u8]],
-        sigschemes: &[SignatureScheme],
-    ) -> Option<Arc<CertifiedKey>> {
-        println!("Server sig schemes: {:#?}", sigschemes);
-        let (chain, signing_key) = get_chain(&self.0, &self.1).ok()?;
-        for scheme in signing_key.supported_schemes() {
-            if sigschemes.contains(scheme) {
-                return Some(Arc::new(CertifiedKey {
-                    cert: chain,
-                    key: Arc::new(signing_key),
-                    ocsp: None,
-                }));
-            }
-        }
-        None
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = std::env::args().collect::<Vec<_>>();
+    if args.len() < 2 {
+        println!("Usage: {} <sni-name> [client-cert-name]", args[0]);
+        return Ok(());
     }
-
-    fn has_certs(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Parser)]
-#[clap(name = "rustls-client-sample")]
-struct AppParams {
-    #[clap(
-        short = 'c',
-        long = "ca-cert",
-        help = "CA cert name to verify the peer certificate"
-    )]
-    ca_cert: String,
-
-    #[clap(short = 'k', long = "keystore", help = "Use external PFX keystore")]
-    keystore: Option<PathBuf>,
-
-    #[clap(
-        short = 'p',
-        long = "password",
-        help = "Keystore password",
-        default_value = "changeit"
-    )]
-    password: String,
-
-    #[clap(
-        short = 's',
-        long = "server-name",
-        help = "Server name for TLS SNI extension"
-    )]
-    server_name: String,
-
-    #[clap(
-        short = 'l',
-        long = "client-cert",
-        help = "Client cert name for client auth"
-    )]
-    client_cert: String,
-
-    #[clap(help = "Server address")]
-    server_address: String,
-}
-
-fn main() -> anyhow::Result<()> {
-    let params: AppParams = AppParams::parse();
-
-    let store = if let Some(ref keystore) = params.keystore {
-        let data = std::fs::read(keystore)?;
-        CertStore::from_pkcs12(&data, &params.password)?
-    } else {
-        CertStore::open(CertStoreType::LocalMachine, "my")?
-    };
-
-    let ca_cert_context = store.find_by_subject_str(&params.ca_cert)?;
-    let ca_cert = ca_cert_context.first().unwrap();
 
     let mut root_store = RootCertStore::empty();
-    root_store.add(ca_cert.as_der().into())?;
+    root_store.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
 
-    let client_config = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_client_cert_resolver(Arc::new(ClientCertResolver(
-            store,
-            params.client_cert.clone(),
-        )));
+    let builder =
+        ClientConfig::builder(Arc::new(rustls_aws_lc_rs::DEFAULT_PROVIDER)).with_root_certificates(root_store);
 
-    let server_name = ServerName::try_from(params.server_name.as_str())?.to_owned();
-    let mut connection = ClientConnection::new(Arc::new(client_config), server_name)?;
-    let mut client = TcpStream::connect(format!("{}:{}", params.server_address, PORT))?;
+    let client_config = Arc::new(if let Some(client_cert) = args.get(2) {
+        let credentials = get_credentials(client_cert)?;
+        builder.with_client_cng_credentials(credentials)?
+    } else {
+        builder.with_no_client_auth()?
+    });
 
-    let mut tls_stream = Stream::new(&mut connection, &mut client);
+    let server_name = ServerName::try_from(args[1].as_str())?.to_owned();
+
+    let mut client_output = Vec::new();
+    let connection = client_config.connect(server_name).build(&mut client_output)?;
+    let client = TcpStream::connect(format!("127.0.0.1:{}", PORT))?;
+
+    let mut tls_stream = StreamOwned::new(connection, client, client_output);
+
     tls_stream.write_all(b"ping")?;
     tls_stream.sock.shutdown(Shutdown::Write)?;
 
