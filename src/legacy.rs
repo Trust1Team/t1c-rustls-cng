@@ -7,12 +7,11 @@ use windows_sys::Win32::Security::Cryptography::*;
 use crate::{Result, cert::CertContext, error::CngError};
 
 // windows-sys 0.61 names the legacy provider handle HCRYPTPROV_LEGACY.
-#[allow(non_camel_case_types)]
-type HCRYPTPROV = HCRYPTPROV_LEGACY;
+type CspHandle = HCRYPTPROV_LEGACY;
 
 #[derive(Debug)]
 struct InnerLegacyCspKey {
-    handle: HCRYPTPROV,
+    handle: CspHandle,
     key_spec: u32,
     caller_free: bool,
     // Retain the certificate context, whose cached key handle can be owned by it.
@@ -38,7 +37,7 @@ pub struct LegacyCspKey {
 impl LegacyCspKey {
     /// Wrap a CSP handle while retaining its certificate context.
     pub(crate) fn new(
-        handle: HCRYPTPROV,
+        handle: CspHandle,
         key_spec: u32,
         caller_free: bool,
         context: CertContext,

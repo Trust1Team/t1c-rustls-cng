@@ -56,6 +56,18 @@ using `ProviderCredentials` with a legacy CSP for TLS authentication. The
 provider-aware client/server configuration helpers do **not** change protocol
 versions on your behalf.
 
+For an interactive test on the affected Windows PC, obtain the QuoVadis
+certificate's SHA-1 thumbprint from `certmgr.msc` and run:
+
+```text
+cargo run --example diagnose_provider -- <SHA-1 thumbprint>
+```
+
+This selects exactly one certificate from the **running account's**
+`CurrentUser\My`, attempts acquisition with UI allowed, reports whether it
+used CNG or a CSP, and signs a fixed test digest without logging PINs.
+It is a diagnostic, not proof of a successful end-to-end T1C transaction.
+
 `silent: false` permits Windows/provider prompts; `silent: true` suppresses
 prompts during key acquisition. If acquisition fails (including a cancelled
 prompt), no PIN can be set through the returned-key APIs. Test the QuoVadis
