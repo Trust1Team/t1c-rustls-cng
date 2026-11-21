@@ -1,6 +1,6 @@
 [package]
 name = "rustls-cng"
-version = "0.8.0-dev"
+version = "0.5.3"
 authors = ["Dmitry Pankratov <dmitry@pankratov.net>"]
 description = "Windows CNG API bridge for rustls"
 license = "MIT/Apache-2.0"
@@ -18,14 +18,14 @@ features = ["time"]
 
 [dependencies]
 sha2 = "0.10"
-rustls = { git = "https://github.com/rustls/rustls.git", default-features = false }
+rustls = { git = "https://github.com/rustls/rustls.git", rev = "5535e9d42ac73b6e4ea6114297987583fc75dbab", default-features = false }
 time = { version = "0.3", default-features = false, optional = true }
 bitflags = "2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
-rustls-aws-lc-rs = { git = "https://github.com/rustls/rustls.git" }
-rustls-util = { git = "https://github.com/rustls/rustls.git" }
+rustls-aws-lc-rs = { git = "https://github.com/rustls/rustls.git", rev = "5535e9d42ac73b6e4ea6114297987583fc75dbab" }
+rustls-util = { git = "https://github.com/rustls/rustls.git", rev = "5535e9d42ac73b6e4ea6114297987583fc75dbab" }
 rustls-native-certs = "0.8"
 
 [features]
